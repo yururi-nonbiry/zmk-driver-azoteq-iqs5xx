@@ -147,6 +147,8 @@ struct iqs5xx_data {
     // Flag to indicate if the button was pressed in a previous cycle.
     uint8_t buttons_pressed;
     bool active_hold;
+    // Whether at least one finger was on the trackpad in the previous cycle.
+    bool touching;
     // Scroll accumulators.
     int16_t scroll_x_acc;
     int16_t scroll_y_acc;

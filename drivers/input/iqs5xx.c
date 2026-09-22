@@ -126,6 +126,17 @@ static void iqs5xx_work_handler(struct k_work *work) {
         data->scroll_y_acc = 0;
     }
 
+    // Read unconditionally (not just during tp_movement) so a finger that
+    // lands and stays still - which never sets tp_movement, since the chip
+    // only raises it once the finger actually moves - is still noticed here.
+    ret = iqs5xx_read_reg8(dev, IQS5XX_NUM_FINGERS, &num_fingers);
+    if (ret < 0) {
+        LOG_ERR("Failed to read number of fingers: %d", ret);
+        goto end_comm;
+    }
+    bool touch_started = num_fingers > 0 && !data->touching;
+    data->touching = num_fingers > 0;
+
     uint16_t button_code;
     bool button_pressed = false;
     if (gesture_events_0 & IQS5XX_SINGLE_TAP) {
@@ -152,6 +163,16 @@ static void iqs5xx_work_handler(struct k_work *work) {
             LOG_ERR("Failed to read relative Y: %d", ret);
             goto end_comm;
         }
+    }
+
+    // A finger landing should immediately cancel any inertia/momentum that
+    // downstream input processors (e.g. zip_inertia) are still coasting from
+    // a previous gesture, even before this finger has moved. Since the chip
+    // never reports rel_x/rel_y for a stationary touch, send a zero-delta
+    // move report - processors that track "new movement cancels coast"
+    // react to this the same way they would to a real movement.
+    if (touch_started) {
+        input_report_rel(dev, INPUT_REL_X, 0, true, K_FOREVER);
     }
 
     // Handle movement and gestures.
@@ -209,12 +230,6 @@ static void iqs5xx_work_handler(struct k_work *work) {
             goto end_comm;
         }
     } else if (tp_movement) {
-        ret = iqs5xx_read_reg8(dev, IQS5XX_NUM_FINGERS, &num_fingers);
-        if (ret < 0) {
-            LOG_ERR("Failed to read number of fingers: %d", ret);
-            goto end_comm;
-        }
-
         if (rel_x != 0 || rel_y != 0) {
             input_report_rel(dev, INPUT_REL_X, rel_x, false, K_FOREVER);
             input_report_rel(dev, INPUT_REL_Y, rel_y, true, K_FOREVER);
@@ -237,9 +252,13 @@ static int iqs5xx_setup_device(const struct device *dev) {
     const struct iqs5xx_config *config = dev->config;
     int ret;
 
-    // Enable event mode and trackpad events.
+    // Enable event mode, trackpad events, and touch events. Without
+    // TOUCH_EVENT the chip only opens a communication window while a finger
+    // is moving, so a finger that lands and stays still, or lifts without
+    // moving first, would never raise RDY and touch_started would never fire.
     ret = iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONFIG_1,
-                            IQS5XX_EVENT_MODE | IQS5XX_TP_EVENT | IQS5XX_GESTURE_EVENT);
+                            IQS5XX_EVENT_MODE | IQS5XX_TP_EVENT | IQS5XX_GESTURE_EVENT |
+                                IQS5XX_TOUCH_EVENT);
     if (ret < 0) {
         LOG_ERR("Failed to configure event mode: %d", ret);
         return ret;
